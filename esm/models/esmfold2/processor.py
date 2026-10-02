@@ -50,9 +50,10 @@ def _lm_dropout_context(model: Any, lm_dropout: float | None):
     Applies dropout to ``lm_z`` at inference (``training=True``, fresh mask per
     loop) so repeated folds give a diverse ensemble. Release models read
     ``config.lm_encoder.lm_dropout``, the experimental model a top-level
-    ``config.lm_dropout`` — disambiguated by ``config.type``. ``None``/``0`` is a no-op.
+    ``config.lm_dropout`` — disambiguated by ``config.type``. ``0`` turns the dropout
+    off; ``None`` leaves the checkpoint's setting.
     """
-    if not lm_dropout:
+    if lm_dropout is None:
         yield
         return
 
@@ -376,7 +377,7 @@ class ESMFold2InputBuilder:
         lm_dropout : float, optional
             LM-embedding dropout for this fold (fresh mask per loop → diverse
             ensemble on repeated folds). Defaults to ``0.3`` (paper folding-eval
-            value); ``0``/``None`` disables.
+            value); ``0`` disables it, ``None`` keeps the checkpoint's setting.
         msa_max_depth : int, optional
             Maximum number of MSA rows kept per loop (row subsampling
             is drawn fresh per loop). Defaults to ``config.msa_encoder.max_depth``

@@ -15,7 +15,7 @@ import torch
 
 from esm.models.esmfold2 import layers as _layers
 from esm.models.esmfold2.prepare_input import prepare_esmfold2_input
-from esm.models.esmfold2.processor import ESMFold2InputBuilder
+from esm.models.esmfold2.processor import ESMFold2InputBuilder, _lm_dropout_context
 from esm.models.esmfold2.protein_utils import (
     OUTPUT_TO_PDB_FEATURE_KEYS,
     prepare_protein_features,
@@ -459,3 +459,62 @@ def test_experimental_forward_supports_include_embeddings(
     pooled = output["output_embedding_pair_pooled"]
     assert pooled.shape == (1, len(TINY_SEQUENCE), _pair_width(tiny_esmfold2_config))
     assert pooled.dtype == torch.float32
+
+
+# ---------------------------------------------------------------------------
+# lm_dropout
+# ---------------------------------------------------------------------------
+
+CONFIGURED_LM_DROPOUT = 0.25
+
+
+def lm_dropout_holder(model):
+    """The config object ``fold`` reads the LM dropout from, per architecture."""
+    config = model.config
+    return (
+        config if getattr(config, "type", None) == "experimental" else config.lm_encoder
+    )
+
+
+@pytest.fixture(params=["tiny_esmfold2", "tiny_experimental"])
+def lm_dropout_model(request):
+    """Either architecture, with the dropout its checkpoint config asks for."""
+    model = request.getfixturevalue(request.param)
+    lm_dropout_holder(model).lm_dropout = CONFIGURED_LM_DROPOUT
+    return model
+
+
+def applied_lm_dropout(model, lm_dropout, monkeypatch) -> set[float]:
+    """The dropout rates a forward applies in training mode under ``lm_dropout``."""
+    rates: set[float] = set()
+    real = torch.nn.functional.dropout
+
+    def spy(input, p=0.5, training=True, inplace=False):
+        if training:
+            rates.add(p)
+        return real(input, p, training, inplace)
+
+    monkeypatch.setattr(torch.nn.functional, "dropout", spy)
+    features, lm_hidden_states = esmfold2_inputs(model, TINY_SEQUENCE)
+    with _lm_dropout_context(model, lm_dropout), torch.no_grad():
+        model(**features, lm_hidden_states=lm_hidden_states, **FAST_FOLD)
+    return rates
+
+
+@pytest.mark.parametrize(
+    "lm_dropout,expected",
+    [(0.0, set()), (None, {CONFIGURED_LM_DROPOUT}), (0.4, {0.4})],
+    ids=["zero-disables", "none-keeps-the-checkpoint", "positive-overrides"],
+)
+def test_lm_dropout_rate_reaches_the_forward(
+    lm_dropout_model, monkeypatch, lm_dropout, expected
+):
+    assert applied_lm_dropout(lm_dropout_model, lm_dropout, monkeypatch) == expected
+
+
+def test_lm_dropout_is_restored_when_the_forward_raises(lm_dropout_model):
+    with pytest.raises(RuntimeError, match="boom"):
+        with _lm_dropout_context(lm_dropout_model, 0.0):
+            raise RuntimeError("boom")
+
+    assert lm_dropout_holder(lm_dropout_model).lm_dropout == CONFIGURED_LM_DROPOUT
